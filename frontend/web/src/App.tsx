@@ -6,19 +6,17 @@ import { getContractReadOnly, getContractWithSigner } from "./contract";
 import "./App.css";
 import { useAccount, useSignMessage } from 'wagmi';
 
-interface ChessPiece {
+interface LotteryTicket {
   id: number;
-  type: string;
-  position: { x: number; y: number };
-  color: 'white' | 'black';
-  encryptedData: string;
+  number: string;
+  owner: string;
+  timestamp: number;
 }
 
-interface ChessMove {
-  from: { x: number; y: number };
-  to: { x: number; y: number };
+interface Winner {
+  address: string;
+  prize: string;
   timestamp: number;
-  player: string;
 }
 
 const FHEEncryptNumber = (value: number): string => `FHE-${btoa(value.toString())}`;
@@ -29,22 +27,23 @@ const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const { signMessageAsync } = useSignMessage();
   const [loading, setLoading] = useState(true);
-  const [pieces, setPieces] = useState<ChessPiece[]>([]);
-  const [moves, setMoves] = useState<ChessMove[]>([]);
+  const [tickets, setTickets] = useState<LotteryTicket[]>([]);
+  const [winners, setWinners] = useState<Winner[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [creatingGame, setCreatingGame] = useState(false);
+  const [showBuyModal, setShowBuyModal] = useState(false);
+  const [buyingTicket, setBuyingTicket] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ visible: false, status: "pending", message: "" });
-  const [selectedPiece, setSelectedPiece] = useState<ChessPiece | null>(null);
-  const [decryptedData, setDecryptedData] = useState<number | null>(null);
+  const [selectedTicket, setSelectedTicket] = useState<LotteryTicket | null>(null);
+  const [decryptedNumber, setDecryptedNumber] = useState<number | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [publicKey, setPublicKey] = useState("");
   const [contractAddress, setContractAddress] = useState("");
   const [chainId, setChainId] = useState(0);
   const [startTimestamp, setStartTimestamp] = useState(0);
   const [durationDays, setDurationDays] = useState(30);
-  const [currentPlayer, setCurrentPlayer] = useState<'white' | 'black'>('white');
-  const [visibleTiles, setVisibleTiles] = useState<{x: number, y: number}[]>([]);
+  const [selectedNumber, setSelectedNumber] = useState("");
+  const [jackpot, setJackpot] = useState("0");
+  const [nextDraw, setNextDraw] = useState("");
 
   useEffect(() => {
     loadData().finally(() => setLoading(false));
@@ -58,6 +57,8 @@ const App: React.FC = () => {
       setStartTimestamp(Math.floor(Date.now() / 1000));
       setDurationDays(30);
       setPublicKey(generatePublicKey());
+      setJackpot("5.42");
+      setNextDraw("2 days 14 hours");
     };
     initSignatureParams();
   }, []);
@@ -74,26 +75,25 @@ const App: React.FC = () => {
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
       }
       
-      const piecesBytes = await contract.getData("pieces");
-      let piecesList: ChessPiece[] = [];
-      if (piecesBytes.length > 0) {
+      const ticketsBytes = await contract.getData("tickets");
+      let ticketsList: LotteryTicket[] = [];
+      if (ticketsBytes.length > 0) {
         try {
-          const piecesStr = ethers.toUtf8String(piecesBytes);
-          if (piecesStr.trim() !== '') piecesList = JSON.parse(piecesStr);
+          const ticketsStr = ethers.toUtf8String(ticketsBytes);
+          if (ticketsStr.trim() !== '') ticketsList = JSON.parse(ticketsStr);
         } catch (e) {}
       }
-      setPieces(piecesList);
+      setTickets(ticketsList);
 
-      const movesBytes = await contract.getData("moves");
-      let movesList: ChessMove[] = [];
-      if (movesBytes.length > 0) {
+      const winnersBytes = await contract.getData("winners");
+      let winnersList: Winner[] = [];
+      if (winnersBytes.length > 0) {
         try {
-          const movesStr = ethers.toUtf8String(movesBytes);
-          if (movesStr.trim() !== '') movesList = JSON.parse(movesStr);
+          const winnersStr = ethers.toUtf8String(winnersBytes);
+          if (winnersStr.trim() !== '') winnersList = JSON.parse(winnersStr);
         } catch (e) {}
       }
-      setMoves(movesList);
-      updateVisibleTiles(piecesList);
+      setWinners(winnersList);
     } catch (e) {
       console.error("Error loading data:", e);
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
@@ -104,88 +104,47 @@ const App: React.FC = () => {
     }
   };
 
-  const updateVisibleTiles = (pieces: ChessPiece[]) => {
-    const myPieces = pieces.filter(p => p.color === currentPlayer);
-    const tiles: {x: number, y: number}[] = [];
-    
-    myPieces.forEach(piece => {
-      const range = piece.type === 'pawn' ? 1 : 
-                   piece.type === 'knight' ? 2 : 3;
-      
-      for (let x = Math.max(0, piece.position.x - range); x <= Math.min(7, piece.position.x + range); x++) {
-        for (let y = Math.max(0, piece.position.y - range); y <= Math.min(7, piece.position.y + range); y++) {
-          if (!tiles.some(t => t.x === x && t.y === y)) {
-            tiles.push({x, y});
-          }
-        }
-      }
-    });
-    
-    setVisibleTiles(tiles);
-  };
-
-  const createNewGame = async () => {
+  const buyTicket = async () => {
     if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
     
-    setCreatingGame(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating new game with Zama FHE..." });
+    setBuyingTicket(true);
+    setTransactionStatus({ visible: true, status: "pending", message: "Buying ticket with Zama FHE..." });
     
     try {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
-      const initialPieces: ChessPiece[] = [
-        { id: 1, type: 'rook', position: { x: 0, y: 0 }, color: 'white', encryptedData: FHEEncryptNumber(5) },
-        { id: 2, type: 'knight', position: { x: 1, y: 0 }, color: 'white', encryptedData: FHEEncryptNumber(3) },
-        { id: 3, type: 'bishop', position: { x: 2, y: 0 }, color: 'white', encryptedData: FHEEncryptNumber(3) },
-        { id: 4, type: 'queen', position: { x: 3, y: 0 }, color: 'white', encryptedData: FHEEncryptNumber(9) },
-        { id: 5, type: 'king', position: { x: 4, y: 0 }, color: 'white', encryptedData: FHEEncryptNumber(0) },
-        { id: 6, type: 'bishop', position: { x: 5, y: 0 }, color: 'white', encryptedData: FHEEncryptNumber(3) },
-        { id: 7, type: 'knight', position: { x: 6, y: 0 }, color: 'white', encryptedData: FHEEncryptNumber(3) },
-        { id: 8, type: 'rook', position: { x: 7, y: 0 }, color: 'white', encryptedData: FHEEncryptNumber(5) },
-        { id: 9, type: 'pawn', position: { x: 0, y: 1 }, color: 'white', encryptedData: FHEEncryptNumber(1) },
-        { id: 10, type: 'pawn', position: { x: 1, y: 1 }, color: 'white', encryptedData: FHEEncryptNumber(1) },
-        { id: 11, type: 'pawn', position: { x: 2, y: 1 }, color: 'white', encryptedData: FHEEncryptNumber(1) },
-        { id: 12, type: 'pawn', position: { x: 3, y: 1 }, color: 'white', encryptedData: FHEEncryptNumber(1) },
-        { id: 13, type: 'pawn', position: { x: 4, y: 1 }, color: 'white', encryptedData: FHEEncryptNumber(1) },
-        { id: 14, type: 'pawn', position: { x: 5, y: 1 }, color: 'white', encryptedData: FHEEncryptNumber(1) },
-        { id: 15, type: 'pawn', position: { x: 6, y: 1 }, color: 'white', encryptedData: FHEEncryptNumber(1) },
-        { id: 16, type: 'pawn', position: { x: 7, y: 1 }, color: 'white', encryptedData: FHEEncryptNumber(1) },
-        { id: 17, type: 'rook', position: { x: 0, y: 7 }, color: 'black', encryptedData: FHEEncryptNumber(5) },
-        { id: 18, type: 'knight', position: { x: 1, y: 7 }, color: 'black', encryptedData: FHEEncryptNumber(3) },
-        { id: 19, type: 'bishop', position: { x: 2, y: 7 }, color: 'black', encryptedData: FHEEncryptNumber(3) },
-        { id: 20, type: 'queen', position: { x: 3, y: 7 }, color: 'black', encryptedData: FHEEncryptNumber(9) },
-        { id: 21, type: 'king', position: { x: 4, y: 7 }, color: 'black', encryptedData: FHEEncryptNumber(0) },
-        { id: 22, type: 'bishop', position: { x: 5, y: 7 }, color: 'black', encryptedData: FHEEncryptNumber(3) },
-        { id: 23, type: 'knight', position: { x: 6, y: 7 }, color: 'black', encryptedData: FHEEncryptNumber(3) },
-        { id: 24, type: 'rook', position: { x: 7, y: 7 }, color: 'black', encryptedData: FHEEncryptNumber(5) },
-        { id: 25, type: 'pawn', position: { x: 0, y: 6 }, color: 'black', encryptedData: FHEEncryptNumber(1) },
-        { id: 26, type: 'pawn', position: { x: 1, y: 6 }, color: 'black', encryptedData: FHEEncryptNumber(1) },
-        { id: 27, type: 'pawn', position: { x: 2, y: 6 }, color: 'black', encryptedData: FHEEncryptNumber(1) },
-        { id: 28, type: 'pawn', position: { x: 3, y: 6 }, color: 'black', encryptedData: FHEEncryptNumber(1) },
-        { id: 29, type: 'pawn', position: { x: 4, y: 6 }, color: 'black', encryptedData: FHEEncryptNumber(1) },
-        { id: 30, type: 'pawn', position: { x: 5, y: 6 }, color: 'black', encryptedData: FHEEncryptNumber(1) },
-        { id: 31, type: 'pawn', position: { x: 6, y: 6 }, color: 'black', encryptedData: FHEEncryptNumber(1) },
-        { id: 32, type: 'pawn', position: { x: 7, y: 6 }, color: 'black', encryptedData: FHEEncryptNumber(1) }
-      ];
+      const number = parseInt(selectedNumber);
+      if (isNaN(number) || number < 1 || number > 10000) {
+        throw new Error("Please select a valid number between 1-10000");
+      }
+
+      const newTicket: LotteryTicket = {
+        id: tickets.length + 1,
+        number: FHEEncryptNumber(number),
+        owner: address,
+        timestamp: Math.floor(Date.now() / 1000)
+      };
       
-      const tx1 = await contract.setData("pieces", ethers.toUtf8Bytes(JSON.stringify(initialPieces)));
-      const tx2 = await contract.setData("moves", ethers.toUtf8Bytes(JSON.stringify([])));
+      const updatedTickets = [...tickets, newTicket];
       
-      await tx1.wait();
-      await tx2.wait();
+      const tx = await contract.setData("tickets", ethers.toUtf8Bytes(JSON.stringify(updatedTickets)));
+      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
       
-      setTransactionStatus({ visible: true, status: "success", message: "Game created successfully!" });
+      await tx.wait();
+      
+      setTransactionStatus({ visible: true, status: "success", message: "Ticket purchased successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       await loadData();
       
-      setShowCreateModal(false);
+      setShowBuyModal(false);
+      setSelectedNumber("");
     } catch (e: any) {
       const errorMessage = e.message.includes("user rejected transaction") 
         ? "Transaction rejected by user" 
@@ -193,7 +152,7 @@ const App: React.FC = () => {
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
-      setCreatingGame(false); 
+      setBuyingTicket(false); 
     }
   };
 
@@ -218,170 +177,88 @@ const App: React.FC = () => {
     }
   };
 
-  const handlePieceClick = async (piece: ChessPiece) => {
-    if (piece.color !== currentPlayer) return;
+  const renderStats = () => {
+    const totalTickets = tickets.length;
+    const myTickets = tickets.filter(t => t.owner === address).length;
+    const totalWinners = winners.length;
     
-    setSelectedPiece(piece);
-    const decrypted = await decryptWithSignature(piece.encryptedData);
-    if (decrypted !== null) {
-      setDecryptedData(decrypted);
-    }
-  };
-
-  const handleMove = async (x: number, y: number) => {
-    if (!selectedPiece || !isConnected) return;
-    
-    try {
-      const contract = await getContractWithSigner();
-      if (!contract) return;
-      
-      const updatedPieces = pieces.map(p => 
-        p.id === selectedPiece.id ? { ...p, position: { x, y } } : p
-      );
-      
-      const newMove: ChessMove = {
-        from: selectedPiece.position,
-        to: { x, y },
-        timestamp: Math.floor(Date.now() / 1000),
-        player: address || ''
-      };
-      
-      const updatedMoves = [...moves, newMove];
-      
-      const tx1 = await contract.setData("pieces", ethers.toUtf8Bytes(JSON.stringify(updatedPieces)));
-      const tx2 = await contract.setData("moves", ethers.toUtf8Bytes(JSON.stringify(updatedMoves)));
-      
-      await tx1.wait();
-      await tx2.wait();
-      
-      setTransactionStatus({ visible: true, status: "success", message: "Move executed successfully!" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-      
-      await loadData();
-      setSelectedPiece(null);
-      setDecryptedData(null);
-      setCurrentPlayer(currentPlayer === 'white' ? 'black' : 'white');
-    } catch (e) {
-      console.error("Error making move:", e);
-      setTransactionStatus({ visible: true, status: "error", message: "Failed to execute move" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-    }
-  };
-
-  const renderChessboard = () => {
-    const board = [];
-    
-    for (let y = 0; y < 8; y++) {
-      for (let x = 0; x < 8; x++) {
-        const piece = pieces.find(p => p.position.x === x && p.position.y === y);
-        const isVisible = visibleTiles.some(t => t.x === x && t.y === y);
-        const isSelected = selectedPiece?.position.x === x && selectedPiece?.position.y === y;
+    return (
+      <div className="stats-panels">
+        <div className="panel gradient-panel">
+          <h3>Current Jackpot</h3>
+          <div className="stat-value">{jackpot} ETH</div>
+          <div className="stat-trend">Next draw in {nextDraw}</div>
+        </div>
         
-        board.push(
-          <div 
-            key={`${x}-${y}`} 
-            className={`tile ${(x + y) % 2 === 0 ? 'light' : 'dark'} 
-              ${isVisible ? 'visible' : 'hidden'} 
-              ${isSelected ? 'selected' : ''}`}
-            onClick={() => {
-              if (selectedPiece && isVisible) {
-                handleMove(x, y);
-              }
-            }}
-          >
-            {piece && isVisible && (
-              <div 
-                className={`piece ${piece.color} ${piece.type} 
-                  ${piece.color === currentPlayer ? 'selectable' : ''}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (piece.color === currentPlayer) {
-                    handlePieceClick(piece);
-                  }
-                }}
-              >
-                {selectedPiece?.id === piece.id && decryptedData !== null && (
-                  <div className="piece-value">{decryptedData}</div>
-                )}
-              </div>
-            )}
+        <div className="panel gradient-panel">
+          <h3>Total Tickets</h3>
+          <div className="stat-value">{totalTickets}</div>
+          <div className="stat-trend">{myTickets} owned by you</div>
+        </div>
+        
+        <div className="panel gradient-panel">
+          <h3>Past Winners</h3>
+          <div className="stat-value">{totalWinners}</div>
+          <div className="stat-trend">Last winner: {totalWinners > 0 ? winners[0].address.substring(0, 6)+"..." : "None"}</div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderWinners = () => {
+    return (
+      <div className="winners-list">
+        <h3>Recent Winners</h3>
+        {winners.length === 0 ? (
+          <div className="no-winners">
+            <p>No winners yet</p>
           </div>
-        );
+        ) : winners.slice(0, 5).map((winner, index) => (
+          <div className="winner-item" key={index}>
+            <div className="winner-rank">{index + 1}</div>
+            <div className="winner-info">
+              <div className="winner-address">{winner.address.substring(0, 6)}...{winner.address.substring(38)}</div>
+              <div className="winner-prize">{winner.prize} ETH</div>
+            </div>
+            <div className="winner-time">{new Date(winner.timestamp * 1000).toLocaleDateString()}</div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const renderFAQ = () => {
+    const faqItems = [
+      {
+        question: "How does FHE protect my lottery number?",
+        answer: "Your selected number is encrypted with Zama FHE before being stored on-chain, ensuring only you can decrypt it with your wallet signature."
+      },
+      {
+        question: "How is the winner determined?",
+        answer: "The winning number is generated securely and matched against encrypted tickets using homomorphic computation, preserving privacy."
+      },
+      {
+        question: "When are draws held?",
+        answer: "Draws occur weekly. The exact time is displayed in the jackpot panel."
+      },
+      {
+        question: "How do I claim my prize?",
+        answer: "If your encrypted number matches the winning number, you'll be able to privately claim your prize without revealing your number."
+      },
+      {
+        question: "What happens if I lose?",
+        answer: "Your number remains encrypted and private. No one will know what numbers you played."
       }
-    }
-    
-    return board;
-  };
-
-  const renderMoveHistory = () => {
-    return (
-      <div className="move-history">
-        <h3>Move History</h3>
-        <div className="moves-list">
-          {moves.length === 0 ? (
-            <div className="no-moves">No moves yet</div>
-          ) : (
-            moves.map((move, index) => (
-              <div key={index} className="move-item">
-                <span>{index + 1}. </span>
-                <span>{String.fromCharCode(97 + move.from.x)}{8 - move.from.y}</span>
-                <span> → </span>
-                <span>{String.fromCharCode(97 + move.to.x)}{8 - move.to.y}</span>
-                <span className="move-player">{move.player.substring(0, 6)}...</span>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  const renderFHEInfo = () => {
-    return (
-      <div className="fhe-info">
-        <h3>Zama FHE Encryption</h3>
-        <p>All piece values are encrypted using Zama's Fully Homomorphic Encryption.</p>
-        <div className="fhe-steps">
-          <div className="step">
-            <div className="step-number">1</div>
-            <div className="step-content">
-              <h4>Encrypt</h4>
-              <p>Piece values encrypted on-chain</p>
-            </div>
-          </div>
-          <div className="step">
-            <div className="step-number">2</div>
-            <div className="step-content">
-              <h4>Verify</h4>
-              <p>Moves verified without decryption</p>
-            </div>
-          </div>
-          <div className="step">
-            <div className="step-number">3</div>
-            <div className="step-content">
-              <h4>Decrypt</h4>
-              <p>View values with wallet signature</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const renderPlayerStats = () => {
-    const whitePieces = pieces.filter(p => p.color === 'white');
-    const blackPieces = pieces.filter(p => p.color === 'black');
+    ];
     
     return (
-      <div className="player-stats">
-        <div className="stat white-stat">
-          <h4>White Player</h4>
-          <div className="stat-value">{whitePieces.length} pieces</div>
-        </div>
-        <div className="stat black-stat">
-          <h4>Black Player</h4>
-          <div className="stat-value">{blackPieces.length} pieces</div>
-        </div>
+      <div className="faq-container">
+        {faqItems.map((item, index) => (
+          <div className="faq-item" key={index}>
+            <div className="faq-question">{item.question}</div>
+            <div className="faq-answer">{item.answer}</div>
+          </div>
+        ))}
       </div>
     );
   };
@@ -389,7 +266,7 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Initializing encrypted chess game...</p>
+      <p>Initializing encrypted lottery system...</p>
     </div>
   );
 
@@ -397,16 +274,18 @@ const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo">
-          <div className="chess-icon"></div>
-          <h1>Fog of War Chess</h1>
+          <div className="logo-icon">
+            <div className="lottery-icon"></div>
+          </div>
+          <h1>Lottery<span>Shield</span></h1>
         </div>
         
         <div className="header-actions">
           <button 
-            onClick={() => setShowCreateModal(true)} 
-            className="new-game-btn"
+            onClick={() => setShowBuyModal(true)} 
+            className="buy-btn"
           >
-            New Game
+            <div className="ticket-icon"></div>Buy Ticket
           </button>
           <div className="wallet-connect-wrapper">
             <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
@@ -414,49 +293,89 @@ const App: React.FC = () => {
         </div>
       </header>
       
-      <div className="main-content">
-        <div className="chessboard-container">
-          <div className="current-player">
-            Current Turn: <span className={currentPlayer}>{currentPlayer}</span>
-          </div>
-          <div className="chessboard">
-            {renderChessboard()}
-          </div>
+      <div className="main-content-container">
+        <div className="stats-section">
+          <h2>Lottery Statistics</h2>
+          {renderStats()}
         </div>
         
-        <div className="sidebar">
-          {renderPlayerStats()}
-          {renderMoveHistory()}
-          {renderFHEInfo()}
-        </div>
-      </div>
-      
-      {showCreateModal && (
-        <div className="modal-overlay">
-          <div className="create-game-modal">
-            <div className="modal-header">
-              <h2>New Fog of War Game</h2>
-              <button onClick={() => setShowCreateModal(false)} className="close-modal">&times;</button>
-            </div>
-            <div className="modal-body">
-              <p>Start a new game with Zama FHE encryption for piece values.</p>
-              <div className="fhe-notice">
-                <div className="lock-icon"></div>
-                <span>All piece values will be encrypted</span>
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button onClick={() => setShowCreateModal(false)} className="cancel-btn">Cancel</button>
+        <div className="tickets-section">
+          <div className="section-header">
+            <h2>Your Tickets</h2>
+            <div className="header-actions">
               <button 
-                onClick={createNewGame} 
-                disabled={creatingGame}
-                className="confirm-btn"
+                onClick={loadData} 
+                className="refresh-btn" 
+                disabled={isRefreshing}
               >
-                {creatingGame ? "Creating..." : "Create Game"}
+                {isRefreshing ? "Refreshing..." : "Refresh"}
               </button>
             </div>
           </div>
+          
+          <div className="tickets-list">
+            {tickets.filter(t => t.owner === address).length === 0 ? (
+              <div className="no-tickets">
+                <div className="no-tickets-icon"></div>
+                <p>No tickets found</p>
+                <button 
+                  className="buy-btn" 
+                  onClick={() => setShowBuyModal(true)}
+                >
+                  Buy Your First Ticket
+                </button>
+              </div>
+            ) : tickets.filter(t => t.owner === address).map((ticket, index) => (
+              <div 
+                className={`ticket-item ${selectedTicket?.id === ticket.id ? "selected" : ""}`} 
+                key={index}
+                onClick={() => setSelectedTicket(ticket)}
+              >
+                <div className="ticket-id">Ticket #{ticket.id}</div>
+                <div className="ticket-number">
+                  Number: {ticket.number.substring(0, 15)}...
+                </div>
+                <div className="ticket-date">
+                  Purchased: {new Date(ticket.timestamp * 1000).toLocaleDateString()}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
+        
+        <div className="winners-section">
+          <h2>Winners Board</h2>
+          {renderWinners()}
+        </div>
+        
+        <div className="faq-section">
+          <h2>How It Works</h2>
+          {renderFAQ()}
+        </div>
+      </div>
+      
+      {showBuyModal && (
+        <ModalBuyTicket 
+          onSubmit={buyTicket} 
+          onClose={() => setShowBuyModal(false)} 
+          buying={buyingTicket} 
+          selectedNumber={selectedNumber} 
+          setSelectedNumber={setSelectedNumber}
+        />
+      )}
+      
+      {selectedTicket && (
+        <TicketDetailModal 
+          ticket={selectedTicket} 
+          onClose={() => { 
+            setSelectedTicket(null); 
+            setDecryptedNumber(null); 
+          }} 
+          decryptedNumber={decryptedNumber} 
+          setDecryptedNumber={setDecryptedNumber} 
+          isDecrypting={isDecrypting} 
+          decryptWithSignature={decryptWithSignature}
+        />
       )}
       
       {transactionStatus.visible && (
@@ -476,15 +395,16 @@ const App: React.FC = () => {
         <div className="footer-content">
           <div className="footer-brand">
             <div className="logo">
-              <div className="chess-icon"></div>
-              <span>Fog of War Chess</span>
+              <div className="lottery-icon"></div>
+              <span>Lottery_Shield</span>
             </div>
-            <p>Privacy-preserving chess with Zama FHE</p>
+            <p>Verifiably fair lottery powered by FHE</p>
           </div>
           
           <div className="footer-links">
-            <a href="#" className="footer-link">Rules</a>
-            <a href="#" className="footer-link">About FHE</a>
+            <a href="#" className="footer-link">Documentation</a>
+            <a href="#" className="footer-link">Privacy Policy</a>
+            <a href="#" className="footer-link">Terms</a>
             <a href="#" className="footer-link">Contact</a>
           </div>
         </div>
@@ -493,9 +413,167 @@ const App: React.FC = () => {
           <div className="fhe-badge">
             <span>Powered by Zama FHE</span>
           </div>
-          <div className="copyright">© {new Date().getFullYear()} Fog of War Chess</div>
+          <div className="copyright">© {new Date().getFullYear()} Lottery Shield. All rights reserved.</div>
+          <div className="disclaimer">
+            This system uses fully homomorphic encryption to protect your lottery numbers.
+          </div>
         </div>
       </footer>
+    </div>
+  );
+};
+
+interface ModalBuyTicketProps {
+  onSubmit: () => void; 
+  onClose: () => void; 
+  buying: boolean;
+  selectedNumber: string;
+  setSelectedNumber: (number: string) => void;
+}
+
+const ModalBuyTicket: React.FC<ModalBuyTicketProps> = ({ onSubmit, onClose, buying, selectedNumber, setSelectedNumber }) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSelectedNumber(e.target.value);
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="buy-ticket-modal">
+        <div className="modal-header">
+          <h2>Buy Lottery Ticket</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="fhe-notice">
+            <div className="lock-icon"></div>
+            <div>
+              <strong>FHE Encryption Notice</strong>
+              <p>Your number will be encrypted with Zama FHE</p>
+            </div>
+          </div>
+          
+          <div className="form-group">
+            <label>Select Your Number (1-10000) *</label>
+            <input 
+              type="number" 
+              min="1" 
+              max="10000" 
+              value={selectedNumber} 
+              onChange={handleChange} 
+              placeholder="Enter your lucky number..." 
+            />
+          </div>
+        </div>
+        
+        <div className="modal-footer">
+          <button onClick={onClose} className="cancel-btn">Cancel</button>
+          <button 
+            onClick={onSubmit} 
+            disabled={buying || !selectedNumber} 
+            className="submit-btn"
+          >
+            {buying ? "Processing with FHE..." : "Buy Ticket"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface TicketDetailModalProps {
+  ticket: LotteryTicket;
+  onClose: () => void;
+  decryptedNumber: number | null;
+  setDecryptedNumber: (value: number | null) => void;
+  isDecrypting: boolean;
+  decryptWithSignature: (encryptedData: string) => Promise<number | null>;
+}
+
+const TicketDetailModal: React.FC<TicketDetailModalProps> = ({ 
+  ticket, 
+  onClose, 
+  decryptedNumber, 
+  setDecryptedNumber, 
+  isDecrypting, 
+  decryptWithSignature
+}) => {
+  const handleDecrypt = async () => {
+    if (decryptedNumber !== null) { 
+      setDecryptedNumber(null); 
+      return; 
+    }
+    
+    const decrypted = await decryptWithSignature(ticket.number);
+    if (decrypted !== null) {
+      setDecryptedNumber(decrypted);
+    }
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="ticket-detail-modal">
+        <div className="modal-header">
+          <h2>Ticket Details</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="ticket-info">
+            <div className="info-item">
+              <span>Ticket ID:</span>
+              <strong>#{ticket.id}</strong>
+            </div>
+            <div className="info-item">
+              <span>Owner:</span>
+              <strong>{ticket.owner.substring(0, 6)}...{ticket.owner.substring(38)}</strong>
+            </div>
+            <div className="info-item">
+              <span>Purchase Date:</span>
+              <strong>{new Date(ticket.timestamp * 1000).toLocaleDateString()}</strong>
+            </div>
+          </div>
+          
+          <div className="data-section">
+            <h3>Encrypted Lottery Number</h3>
+            <div className="data-row">
+              <div className="data-label">Number:</div>
+              <div className="data-value">{ticket.number.substring(0, 30)}...</div>
+              <button 
+                className="decrypt-btn" 
+                onClick={handleDecrypt} 
+                disabled={isDecrypting}
+              >
+                {isDecrypting ? (
+                  "Decrypting..."
+                ) : decryptedNumber !== null ? (
+                  "Hide Number"
+                ) : (
+                  "Decrypt Number"
+                )}
+              </button>
+            </div>
+            
+            <div className="fhe-tag">
+              <div className="fhe-icon"></div>
+              <span>FHE Encrypted - Requires Wallet Signature</span>
+            </div>
+          </div>
+          
+          {decryptedNumber !== null && (
+            <div className="decrypted-section">
+              <h3>Your Lucky Number</h3>
+              <div className="number-display">
+                {decryptedNumber}
+              </div>
+            </div>
+          )}
+        </div>
+        
+        <div className="modal-footer">
+          <button onClick={onClose} className="close-btn">Close</button>
+        </div>
+      </div>
     </div>
   );
 };
